@@ -12,11 +12,11 @@ fn criterion_benchmark(c: &mut Criterion) {
         b.iter(|| std::collections::BTreeSet::from_iter(input.iter()))
     });
     c.bench_function("indexset insert 100k", |b| {
-        b.iter(|| BTreeSet::from_iter(input.iter()))
+        b.iter(|| BTreeSet::from_iter(input.iter().cloned()))
     });
 
     let stdlib = std::collections::BTreeSet::from_iter(input.iter());
-    let indexset = BTreeSet::from_iter(input.iter());
+    let indexset = BTreeSet::from_iter(input.iter().cloned());
 
     c.bench_function("stdlib contains 100k", |b| {
         b.iter(|| {
@@ -49,11 +49,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     });
 
     c.bench_function("stdlib collect 100k into vec", |b| {
-        b.iter(|| std::hint::black_box(stdlib.iter().collect::<Vec<&&usize>>()))
+        b.iter(|| std::hint::black_box(stdlib.iter().cloned().cloned().collect::<Vec<usize>>()))
     });
 
     c.bench_function("indexset collect 100k into vec", |b| {
-        b.iter(|| std::hint::black_box(indexset.iter().collect::<Vec<&&usize>>()))
+        b.iter(|| std::hint::black_box(indexset.iter().cloned().collect::<Vec<usize>>()))
     });
 }
 

@@ -13,36 +13,76 @@ use std::iter::FusedIterator;
 use std::mem::swap;
 use std::ops::{Index, RangeBounds};
 
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq, Ord, Hash)]
 struct Node<T>
 where
-    T: Ord,
+    T: Ord + Default,
 {
-    pub inner: Vec<T>,
+    pub inner: [T; DEFAULT_INNER_SIZE],
+    pub len: usize,
 }
 
-impl<T: Ord> PartialOrd for Node<T> {
+impl<T: Ord + Default> PartialOrd for Node<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.last().partial_cmp(&other.last())
     }
 }
 
-impl<T: Ord> Default for Node<T> {
+fn make_node_block<T: Default>() -> [T; DEFAULT_INNER_SIZE] {
+    std::array::from_fn(|_| T::default())
+}
+
+impl<T: Ord + Default> Default for Node<T> {
     fn default() -> Self {
         Self {
-            inner: Vec::with_capacity(DEFAULT_INNER_SIZE),
+            inner: make_node_block(),
+            len: 0,
         }
     }
 }
 
 #[inline]
-fn search<T: Ord>(haystack: &[T], needle: &T) -> Result<usize, usize> {
-    let mut j = haystack.len();
+fn search<T: Ord + Default, Q>(haystack: &Node<T>, needle: &Q) -> Result<usize, usize> where
+        T: Borrow<Q>,
+        Q: Ord + ?Sized
+{
+    unsafe {
+        let mut i = 0;
+        let mut j = haystack.len();
+        let p = haystack.inner.as_ptr();
+
+        macro_rules! step {
+            () => {
+                if i != j {
+                    let m = (i + j) >> 1;
+                    match (*p.add(m)).borrow().cmp(needle) {
+                        Ordering::Equal => return Ok(m),
+                        Ordering::Less => i = m + 1,
+                        Ordering::Greater => j = m,
+                    }
+                }
+            };
+        }
+
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+        step!();
+
+        Err(i)
+    }
+
+    /*let mut j = haystack.len();
 
     unsafe {
         let mut i = 0;
-        let p = haystack.as_ptr().cast::<T>();
+        let p = haystack.inner.as_ptr().cast::<T>();
         let mut m = j >> 1;
         while i != j {
             match (*p.add(m)).borrow().cmp(needle) {
@@ -58,28 +98,39 @@ fn search<T: Ord>(haystack: &[T], needle: &T) -> Result<usize, usize> {
             }
         }
         Err(i)
-    }
+    }*/
 }
 
-impl<T: Ord> Node<T> {
+impl<T: Ord + Default> Node<T> {
     #[inline]
-    pub fn new(capacity: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            inner: Vec::with_capacity(capacity),
             ..Default::default()
         }
     }
     #[inline]
     pub fn get(&self, index: usize) -> Option<&T> {
-        self.inner.get(index)
+        if self.len() > 0 {
+            return self.inner.get(index)
+        };
+
+        None
     }
     #[inline]
     pub fn split_off(&mut self, cutoff: usize) -> Self {
-        let latter_inner = self.inner.split_off(cutoff);
-
-        Self {
-            inner: latter_inner,
+        if cutoff >= self.len {
+            return Self::default();
         }
+
+        let mut latter = Self::default();
+        latter.len = self.len - cutoff;
+
+        for i in 0..latter.len {
+            swap(&mut latter.inner[i], &mut self.inner[cutoff + i]);
+        }
+
+        self.len = cutoff;
+        latter
     }
     #[inline]
     pub fn halve(&mut self) -> Self {
@@ -87,26 +138,44 @@ impl<T: Ord> Node<T> {
     }
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.len
     }
     #[inline]
     pub fn insert(&mut self, value: T) -> bool {
-        match search(&self.inner, &value) {
+        match search(&self, &value) {
             Ok(_) => return false,
             Err(idx) => {
-                self.inner.insert(idx, value);
+                if self.len < DEFAULT_INNER_SIZE {
+                    for i in (idx..self.len).rev() {
+                        self.inner.swap(i, i + 1);
+                    }
+                    self.inner[idx] = value;
+                    self.len += 1;
+                    true
+                } else {
+                    false
+                }
             }
         }
-
-        true
     }
     #[inline]
     pub fn last(&self) -> Option<&T> {
-        self.inner.last()
+        if self.len > 0 {
+            Some(&self.inner[self.len - 1])
+        } else {
+            None
+        }
     }
+
     #[inline]
     pub fn delete(&mut self, index: usize) -> T {
-        self.inner.remove(index)
+        let mut removed = Default::default();
+        std::mem::swap(&mut removed, &mut self.inner[index]);
+        for i in index..self.len - 1 {
+            self.inner.swap(i, i + 1);
+        }
+        self.len -= 1;
+        removed
     }
 }
 
@@ -165,19 +234,17 @@ impl<T: Ord> Node<T> {
 ///
 /// let set = BTreeSet::from_iter([1, 2, 3]);
 /// ```
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct BTreeSet<T>
 where
-    T: Ord,
+    T: Ord + Default,
 {
     inner: Vec<Node<T>>,
     index: FenwickTree<usize>,
-    node_capacity: usize,
     len: usize,
 }
 
-impl<T: Ord> BTreeSet<T> {
+impl<T: Ord + Default> BTreeSet<T> {
     /// Makes a new, empty `BTreeSet` with maximum node size 1024. Allocates one vec of capacity 1024.
     ///
     /// Note that this does not mean that the maximum number of items is 1024.
@@ -198,19 +265,9 @@ impl<T: Ord> BTreeSet<T> {
             ..Default::default()
         }
     }
-    /// Makes a new, empty `BTreeSet` with the given maximum node size. Allocates one vec with
-    /// the capacity set to be the specified node size.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #![allow(unused_mut)]
-    /// use indexset::BTreeSet;
-    ///
-    /// let mut set: BTreeSet<i32> = BTreeSet::with_maximum_node_size(128);
-    pub fn with_maximum_node_size(maximum_node_size: usize) -> Self {
+    pub fn with_maximum_node_size() -> Self {
         let mut new: Self = Default::default();
-        new.inner = vec![Node::new(maximum_node_size)];
+        new.inner = vec![Node::new()];
 
         new
     }
@@ -227,7 +284,7 @@ impl<T: Ord> BTreeSet<T> {
     /// assert!(v.is_empty());
     /// ```
     pub fn clear(&mut self) {
-        self.inner = vec![Node::new(self.node_capacity)];
+        self.inner = vec![Node::new()];
         self.index = FenwickTree::from_iter(vec![0]);
         self.len = 0;
     }
@@ -280,9 +337,7 @@ impl<T: Ord> BTreeSet<T> {
         Q: Ord + ?Sized,
     {
         let node_idx = self.locate_node(value);
-        let position_within_node = self.inner[node_idx]
-            .inner
-            .partition_point(|item| item.borrow() < value);
+        let position_within_node = search(&self.inner[node_idx], value.borrow()).unwrap_or_else(|position_to_be_inserted_at| position_to_be_inserted_at);
 
         (node_idx, position_within_node)
     }
@@ -722,7 +777,7 @@ impl<T: Ord> BTreeSet<T> {
     pub fn pop_first(&mut self) -> Option<T> {
         let (first_node_idx, first_position_within_node) = (0, 0);
         if let Some(candidate_node) = self.inner.get(first_node_idx) {
-            if candidate_node.get(first_position_within_node).is_some() {
+            if candidate_node.len() > 0 {
                 return Some(self.delete_at(first_node_idx, first_position_within_node));
             }
         }
@@ -767,7 +822,7 @@ impl<T: Ord> BTreeSet<T> {
     /// ```
     pub fn pop_last(&mut self) -> Option<T> {
         let last_node_idx = self.inner.len() - 1;
-        let mut last_position_within_node = self.inner[last_node_idx].inner.len();
+        let mut last_position_within_node = self.inner[last_node_idx].len();
         last_position_within_node = last_position_within_node.saturating_sub(1);
 
         if let Some(candidate_node) = self.inner.get(last_node_idx) {
@@ -1326,8 +1381,10 @@ impl<T: Ord> BTreeSet<T> {
             spine_iter: Iter {
                 btree: self,
                 current_front_node_idx: front_node_idx,
+                current_front_node_inner_idx: front_start_idx,
                 current_front_idx: global_front_idx,
                 current_back_node_idx: back_node_idx,
+                current_back_node_inner_idx: back_start_idx + 1,
                 current_back_idx: global_back_idx + 1,
                 current_front_iterator: front_iter,
                 current_back_iterator: back_iter,
@@ -1338,7 +1395,7 @@ impl<T: Ord> BTreeSet<T> {
 
 impl<T> FromIterator<T> for BTreeSet<T>
 where
-    T: Ord,
+    T: Ord + Default,
 {
     fn from_iter<K: IntoIterator<Item = T>>(iter: K) -> Self {
         let mut btree = BTreeSet::new();
@@ -1352,7 +1409,7 @@ where
 
 impl<T, const N: usize> From<[T; N]> for BTreeSet<T>
 where
-    T: Ord ,
+    T: Ord + Default,
 {
     fn from(value: [T; N]) -> Self {
         let mut btree: BTreeSet<T> = Default::default();
@@ -1367,15 +1424,12 @@ where
 
 impl<T> Default for BTreeSet<T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     fn default() -> Self {
-        let node_capacity = DEFAULT_INNER_SIZE;
-
         Self {
-            inner: vec![Node::new(node_capacity)],
+            inner: vec![Node::new()],
             index: FenwickTree::from_iter(vec![0]),
-            node_capacity,
             len: 0,
         }
     }
@@ -1389,12 +1443,14 @@ where
 /// [`iter`]: BTreeSet::iter
 pub struct Iter<'a, T>
 where
-    T: Ord,
+    T: Ord + Default,
 {
     btree: &'a BTreeSet<T>,
     current_front_node_idx: usize,
+    current_front_node_inner_idx: usize,
     current_front_idx: usize,
     current_back_node_idx: usize,
+    current_back_node_inner_idx: usize,
     current_back_idx: usize,
     current_front_iterator: Option<std::slice::Iter<'a, T>>,
     current_back_iterator: Option<std::slice::Iter<'a, T>>,
@@ -1402,14 +1458,16 @@ where
 
 impl<'a, T> Iter<'a, T>
 where
-    T: Ord,
+    T: Ord + Default,
 {
     pub fn new(btree: &'a BTreeSet<T>) -> Self {
         return Self {
             btree,
             current_front_node_idx: 0,
+            current_front_node_inner_idx: 0,
             current_front_idx: 0,
-            current_back_node_idx: btree.inner.len() - 1,
+            current_back_node_idx: btree.inner.len(),
+            current_back_node_inner_idx: 0,
             current_back_idx: btree.len(),
             current_front_iterator: Some(btree.inner[0].inner.iter()),
             current_back_iterator: Some(btree.inner[btree.inner.len() - 1].inner.iter()),
@@ -1419,7 +1477,7 @@ where
 
 impl<'a, T> Iterator for Iter<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = &'a T;
 
@@ -1427,55 +1485,63 @@ where
         if self.current_front_idx == self.current_back_idx {
             return None;
         }
-        return if let Some(value) = self.current_front_iterator.as_mut().and_then(|i| i.next()) {
-            self.current_front_idx += 1;
-            Some(value)
-        } else {
-            self.current_front_node_idx += 1;
-            if self.current_front_node_idx >= self.btree.inner.len() {
+        let potential_max_front_node_inner_idx = self.btree.inner.get(self.current_front_node_idx);
+        if potential_max_front_node_inner_idx.is_none() {
+            return None;
+        }
+        let max_front_node_inner_idx = potential_max_front_node_inner_idx.unwrap().len();
+
+        if self.current_front_node_inner_idx == max_front_node_inner_idx {
+            if self.current_front_node_idx >= self.btree.inner.len() - 1 {
                 return None;
             }
-            self.current_front_iterator =
-                Some(self.btree.inner[self.current_front_node_idx].inner.iter());
+
+            self.current_front_node_idx += 1;
+            self.current_front_node_inner_idx = 0;
+            self.current_front_iterator = Some(self.btree.inner[self.current_front_node_idx].inner.iter());
 
             self.next()
-        };
+        } else {
+            self.current_front_idx += 1;
+            self.current_front_node_inner_idx += 1;
+            self.current_front_iterator.as_mut().and_then(|i| i.next())
+        }
     }
 }
 
 impl<'a, T> DoubleEndedIterator for Iter<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.current_front_idx == self.current_back_idx {
             return None;
         }
-        return if let Some(value) = self
-            .current_back_iterator
-            .as_mut()
-            .and_then(|i| i.next_back())
-        {
-            self.current_back_idx -= 1;
-            Some(value)
-        } else {
+        //let hint = self.current_back_iterator.as_ref().unwrap().size_hint();
+        if self.current_back_node_inner_idx == 0 {
             if self.current_back_node_idx == 0 {
                 return None;
-            };
+            }
+
             self.current_back_node_idx -= 1;
-            self.current_back_iterator =
-                Some(self.btree.inner[self.current_back_node_idx].inner.iter());
+            let len = self.btree.inner[self.current_back_node_idx].len();
+            self.current_back_node_inner_idx = len;
+            self.current_back_iterator = Some(self.btree.inner[self.current_back_node_idx].inner[0..len].iter());
 
             self.next_back()
-        };
+        } else {
+            self.current_back_idx -= 1;
+            self.current_back_node_inner_idx -= 1;
+            self.current_back_iterator.as_mut().and_then(|i| i.next_back())
+        }
     }
 }
 
-impl<'a, T> FusedIterator for Iter<'a, T> where T:  Ord {}
+impl<'a, T> FusedIterator for Iter<'a, T> where T: Ord + Default {}
 
 impl<'a, T> IntoIterator for &'a BTreeSet<T>
 where
-    T:  Ord,
+    T:  Ord + Default,
 {
     type Item = &'a T;
 
@@ -1494,14 +1560,14 @@ where
 /// [`into_iter`]: BTreeSet#method.into_iter
 pub struct IntoIter<T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     btree: BTreeSet<T>,
 }
 
 impl<T> Iterator for IntoIter<T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = T;
 
@@ -1512,18 +1578,18 @@ where
 
 impl<T> DoubleEndedIterator for IntoIter<T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.btree.pop_last()
     }
 }
 
-impl<T> FusedIterator for IntoIter<T> where T:  Ord {}
+impl<T> FusedIterator for IntoIter<T> where T: Ord + Default {}
 
 impl<T> IntoIterator for BTreeSet<T>
 where
-    T:  Ord,
+    T:  Ord + Default,
 {
     type Item = T;
 
@@ -1537,7 +1603,7 @@ where
 
 struct MergeIter<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     start: bool,
     left_iter: Iter<'a, T>,
@@ -1548,7 +1614,7 @@ where
 
 impl<'a, T> Iterator for MergeIter<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = (Option<&'a T>, Option<&'a T>);
     fn next(&mut self) -> Option<Self::Item> {
@@ -1593,14 +1659,14 @@ where
 /// [`union`]: BTreeSet::union
 pub struct Union<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     merge_iter: MergeIter<'a, T>,
 }
 
 impl<'a, T> Iterator for Union<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = &'a T;
 
@@ -1624,7 +1690,7 @@ where
     }
 }
 
-impl<'a, T> FusedIterator for Union<'a, T> where T:  Ord {}
+impl<'a, T> FusedIterator for Union<'a, T> where T: Ord + Default {}
 
 /// A lazy iterator producing elements in the difference of `BTreeSet`s.
 ///
@@ -1634,14 +1700,14 @@ impl<'a, T> FusedIterator for Union<'a, T> where T:  Ord {}
 /// [`difference`]: BTreeSet::difference
 pub struct Difference<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     merge_iter: MergeIter<'a, T>,
 }
 
 impl<'a, T> Iterator for Difference<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = &'a T;
 
@@ -1666,7 +1732,7 @@ where
     }
 }
 
-impl<'a, T> FusedIterator for Difference<'a, T> where T:  Ord {}
+impl<'a, T: Default> FusedIterator for Difference<'a, T> where T:  Ord {}
 
 /// A lazy iterator producing elements in the symmetric difference of `BTreeSet`s.
 ///
@@ -1676,14 +1742,14 @@ impl<'a, T> FusedIterator for Difference<'a, T> where T:  Ord {}
 /// [`symmetric_difference`]: BTreeSet::symmetric_difference
 pub struct SymmetricDifference<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     merge_iter: MergeIter<'a, T>,
 }
 
 impl<'a, T> Iterator for SymmetricDifference<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = &'a T;
 
@@ -1711,7 +1777,7 @@ where
     }
 }
 
-impl<'a, T> FusedIterator for SymmetricDifference<'a, T> where T:  Ord {}
+impl<'a, T> FusedIterator for SymmetricDifference<'a, T> where T: Ord + Default {}
 
 /// A lazy iterator producing elements in the intersection of `BTreeSet`s.
 ///
@@ -1721,14 +1787,14 @@ impl<'a, T> FusedIterator for SymmetricDifference<'a, T> where T:  Ord {}
 /// [`intersection`]: BTreeSet::intersection
 pub struct Intersection<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     merge_iter: MergeIter<'a, T>,
 }
 
 impl<'a, T> Iterator for Intersection<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     type Item = &'a T;
 
@@ -1752,7 +1818,7 @@ where
     }
 }
 
-impl<'a, T> FusedIterator for Intersection<'a, T> where T:  Ord {}
+impl<'a, T> FusedIterator for Intersection<'a, T> where T:  Ord + Default {}
 
 /// An iterator over a sub-range of items in a `BTreeSet`.
 ///
@@ -1762,14 +1828,14 @@ impl<'a, T> FusedIterator for Intersection<'a, T> where T:  Ord {}
 /// [`range`]: BTreeSet::range
 pub struct Range<'a, T>
 where
-    T:  Ord,
+    T:  Ord + Default,
 {
     spine_iter: Iter<'a, T>,
 }
 
 impl<'a, T> Iterator for Range<'a, T>
 where
-    T:  Ord,
+    T:  Ord + Default,
 {
     type Item = &'a T;
 
@@ -1780,18 +1846,18 @@ where
 
 impl<'a, T> DoubleEndedIterator for Range<'a, T>
 where
-    T:  Ord,
+    T: Ord + Default,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.spine_iter.next_back()
     }
 }
 
-impl<'a, T> FusedIterator for Range<'a, T> where T:  Ord {}
+impl<'a, T> FusedIterator for Range<'a, T> where T:  Ord + Default {}
 
 impl<T> Index<usize> for BTreeSet<T>
 where
-    T: Ord ,
+    T: Ord + Default ,
 {
     type Output = T;
 
@@ -1801,10 +1867,11 @@ where
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone, Hash, Default)]
 struct Pair<K, V>
 where
-    K:  Ord,
+    K: Ord + Default,
+    V: Default
     
 {
     key: K,
@@ -1813,15 +1880,15 @@ where
 
 impl<K, V> Eq for Pair<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
 impl<K, V> PartialEq<Self> for Pair<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
@@ -1830,8 +1897,8 @@ where
 
 impl<K, V> PartialOrd<Self> for Pair<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.key.partial_cmp(&other.key)
@@ -1840,8 +1907,8 @@ where
 
 impl<K, V> Ord for Pair<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn cmp(&self, other: &Self) -> Ordering {
         self.key.cmp(&other.key)
@@ -1850,8 +1917,8 @@ where
 
 pub struct VacantEntry<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     map: &'a mut BTreeMap<K, V>,
     key: K,
@@ -1859,7 +1926,8 @@ where
 
 pub struct OccupiedEntry<'a, K, V>
 where
-    K:  Ord,
+    K:  Ord + Default,
+    V: Default
 {
     map: &'a mut BTreeMap<K, V>,
     idx: usize,
@@ -1867,8 +1935,8 @@ where
 
 pub enum Entry<'a, K, V>
 where
-    K: 'a  + Ord,
-    V: 'a,
+    K: 'a + Ord + Default,
+    V: 'a + Default,
 {
     Vacant(VacantEntry<'a, K, V>),
     Occupied(OccupiedEntry<'a, K, V>),
@@ -1876,8 +1944,8 @@ where
 
 impl<'a, K, V> Entry<'a, K, V>
 where
-    K: 'a  + Ord,
-    V: 'a,
+    K: 'a + Ord + Default,
+    V: 'a + Default,
 {
     pub fn or_insert(self, default: V) -> &'a mut V {
         match self {
@@ -1937,8 +2005,8 @@ where
 
 impl<'a, K, V> OccupiedEntry<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     pub fn key(&self) -> &K {
         &self.map.set.get_index(self.idx).unwrap().key
@@ -1969,7 +2037,8 @@ where
 
 impl<'a, K, V> VacantEntry<'a, K, V>
 where
-    K: Ord,
+    K: Ord + Default,
+    V: Default
 {
     pub fn key(&self) -> &K {
         &self.key
@@ -2072,18 +2141,19 @@ where
 ///     ("Mars", 1.5),
 /// ]);
 /// ```
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BTreeMap<K, V>
 where
-    K:  Ord,
+    K: Ord + Default,
+    V: Default,
 {
     set: BTreeSet<Pair<K, V>>,
 }
 
 impl<K:  Ord, V> Default for BTreeMap<K, V>
 where
-    K:  Ord,
+    K: Ord + Default,
+    V: Default
 {
     fn default() -> Self {
         Self {
@@ -2094,8 +2164,8 @@ where
 
 impl<K, V> FromIterator<(K, V)> for BTreeMap<K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut btree = BTreeMap::new();
@@ -2109,8 +2179,8 @@ where
 
 impl<K:  Ord, V> BTreeMap<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     /// Moves all elements from `other` into `self`, leaving `other` empty.
     ///
@@ -2617,21 +2687,6 @@ where
     pub fn new() -> Self {
         Self {
             ..Default::default()
-        }
-    }
-    /// Makes a new, empty `BTreeSet` with the given maximum node size. Allocates one vec with
-    /// the capacity set to be the specified node size.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #![allow(unused_mut)]
-    /// use indexset::BTreeMap;
-    ///
-    /// let mut set: BTreeMap<usize, usize> = BTreeMap::with_maximum_node_size(128);
-    pub fn with_maximum_node_size(maximum_node_size: usize) -> Self {
-        Self {
-            set: BTreeSet::with_maximum_node_size(maximum_node_size),
         }
     }
     /// Removes and returns the first element in the map.
@@ -3221,8 +3276,8 @@ where
 
 impl<K, V, const N: usize> From<[(K, V); N]> for BTreeMap<K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn from(value: [(K, V); N]) -> Self {
         let mut btree: BTreeMap<K, V> = Default::default();
@@ -3237,8 +3292,8 @@ where
 
 impl<K, V> IntoIterator for BTreeMap<K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (K, V);
     type IntoIter = IntoIterMap<K, V>;
@@ -3252,8 +3307,8 @@ where
 
 impl<'a, K, V> IntoIterator for &'a BTreeMap<K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (&'a K, &'a V);
 
@@ -3274,16 +3329,16 @@ where
 /// [`iter`]: BTreeMap::iter
 pub struct IterMap<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: Iter<'a, Pair<K, V>>,
 }
 
 impl<'a, K, V> Iterator for IterMap<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (&'a K, &'a V);
 
@@ -3298,8 +3353,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for IterMap<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3312,8 +3367,8 @@ where
 
 impl<'a, K, V> FusedIterator for IterMap<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3325,16 +3380,16 @@ where
 /// [`into_iter`]: IntoIterator::into_iter
 pub struct IntoIterMap<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: IntoIter<Pair<K, V>>,
 }
 
 impl<K, V> Iterator for IntoIterMap<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (K, V);
 
@@ -3349,8 +3404,8 @@ where
 
 impl<K, V> DoubleEndedIterator for IntoIterMap<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3363,8 +3418,8 @@ where
 
 impl<K, V> FusedIterator for IntoIterMap<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3376,16 +3431,16 @@ where
 /// [`into_keys`]: BTreeMap::into_keys
 pub struct IntoKeys<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: IntoIterMap<K, V>,
 }
 
 impl<K, V> Iterator for IntoKeys<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = K;
 
@@ -3400,8 +3455,8 @@ where
 
 impl<K, V> DoubleEndedIterator for IntoKeys<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3414,8 +3469,8 @@ where
 
 impl<K, V> FusedIterator for IntoKeys<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3427,16 +3482,16 @@ where
 /// [`into_values`]: BTreeMap::into_values
 pub struct IntoValues<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: IntoIterMap<K, V>,
 }
 
 impl<K, V> Iterator for IntoValues<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = V;
 
@@ -3451,8 +3506,8 @@ where
 
 impl<K, V> DoubleEndedIterator for IntoValues<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3465,8 +3520,8 @@ where
 
 impl<K, V> FusedIterator for IntoValues<K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3478,16 +3533,16 @@ where
 /// [`range`]: BTreeMap::range
 pub struct RangeMap<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: Range<'a, Pair<K, V>>,
 }
 
 impl<'a, K, V> Iterator for RangeMap<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (&'a K, &'a V);
 
@@ -3502,8 +3557,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for RangeMap<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3516,8 +3571,8 @@ where
 
 impl<'a, K, V> FusedIterator for RangeMap<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3529,16 +3584,16 @@ where
 /// [`values`]: BTreeMap::values
 pub struct Values<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: Iter<'a, Pair<K, V>>,
 }
 
 impl<'a, K, V> Iterator for Values<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = &'a V;
 
@@ -3553,8 +3608,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for Values<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3567,8 +3622,8 @@ where
 
 impl<'a, K, V> FusedIterator for Values<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3580,16 +3635,16 @@ where
 /// [`keys`]: BTreeMap::keys
 pub struct Keys<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: Iter<'a, Pair<K, V>>,
 }
 
 impl<'a, K, V> Iterator for Keys<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = &'a K;
 
@@ -3604,8 +3659,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for Keys<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3618,8 +3673,8 @@ where
 
 impl<'a, K, V> FusedIterator for Keys<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3631,8 +3686,8 @@ where
 /// [`iter_mut`]: BTreeMap::iter_mut
 pub struct IterMut<'a, K: 'a, V: 'a>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: std::slice::IterMut<'a, Node<Pair<K, V>>>,
     current_front_node_idx: usize,
@@ -3645,8 +3700,8 @@ where
 
 impl<'a, K, V> Iterator for IterMut<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (&'a K, &'a mut V);
 
@@ -3686,8 +3741,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for IterMut<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.current_front_idx == self.current_back_idx + 1 {
@@ -3727,8 +3782,8 @@ where
 
 impl<'a, K, V> FusedIterator for IterMut<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3740,16 +3795,16 @@ where
 /// [`values_mut`]: BTreeMap::values_mut
 pub struct ValuesMut<'a, K: 'a, V: 'a>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: IterMut<'a, K, V>,
 }
 
 impl<'a, K, V> Iterator for ValuesMut<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = &'a mut V;
 
@@ -3764,8 +3819,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for ValuesMut<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
@@ -3778,8 +3833,8 @@ where
 
 impl<'a, K, V> FusedIterator for ValuesMut<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
@@ -3791,16 +3846,16 @@ where
 /// [`range_mut`]: BTreeMap::range_mut
 pub struct RangeMut<'a, K: 'a, V: 'a>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     inner: IterMut<'a, K, V>,
 }
 
 impl<'a, K, V> Iterator for RangeMut<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     type Item = (&'a K, &'a mut V);
 
@@ -3811,8 +3866,8 @@ where
 
 impl<'a, K, V> DoubleEndedIterator for RangeMut<'a, K, V>
 where
-    K: Ord ,
-    
+    K: Ord + Default,
+    V: Default
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         return self.inner.next_back();
@@ -3821,15 +3876,15 @@ where
 
 impl<'a, K, V> FusedIterator for RangeMut<'a, K, V>
 where
-    K:  Ord,
-    
+    K: Ord + Default,
+    V: Default
 {
 }
 
 impl<K, Q, V> Index<&Q> for BTreeMap<K, V>
 where
-    K: Borrow<Q> + Ord ,
-    
+    K: Borrow<Q> + Ord + Default,
+    V: Default,
     Q: Ord + ?Sized,
 {
     type Output = V;
@@ -3841,13 +3896,13 @@ where
 
 pub struct Cursor<'a, T>
 where
-    T: Ord ,
+    T: Ord + Default,
 {
     set: &'a BTreeSet<T>,
     idx: usize,
 }
 
-impl<'a, T: Ord > Cursor<'a, T> {
+impl<'a, T: Ord + Default> Cursor<'a, T> {
     pub fn move_next(&mut self) {
         if self.idx == self.set.len() {
             self.idx = 0
@@ -3889,13 +3944,13 @@ impl<'a, T: Ord > Cursor<'a, T> {
 
 pub struct CursorMap<'a, K, V>
 where
-    K: 'a + Ord ,
-    V: 'a ,
+    K: 'a + Ord + Default,
+    V: 'a + Default,
 {
     cursor: Cursor<'a, Pair<K, V>>,
 }
 
-impl<'a, K: Ord , V> CursorMap<'a, K, V> {
+impl<'a, K: Ord + Default, V: Default> CursorMap<'a, K, V> {
     pub fn move_next(&mut self) {
         self.cursor.move_next()
     }
@@ -3962,12 +4017,12 @@ mod tests {
 
         let actual_node = input
             .iter()
-            .fold(Node::new(DEFAULT_INNER_SIZE), |mut acc, curr| {
+            .fold(Node::new(), |mut acc, curr| {
                 acc.insert(*curr);
                 acc
             });
 
-        let actual_output: Vec<isize> = actual_node.inner.iter().cloned().collect();
+        let actual_output: Vec<isize> = actual_node.inner[0..expected_output.len()].iter().cloned().collect();
 
         assert_eq!(expected_output, actual_output);
         assert_eq!(*actual_node.last().unwrap(), 10);
@@ -3980,7 +4035,7 @@ mod tests {
             input.push(item.clone() as isize);
         }
 
-        let mut former_node = Node::new(DEFAULT_INNER_SIZE);
+        let mut former_node = Node::new();
         input.iter().for_each(|item| {
             former_node.insert(item.clone());
         });
@@ -3989,8 +4044,8 @@ mod tests {
         let expected_former_output: Vec<isize> = input[0..DEFAULT_CUTOFF].to_vec();
         let expected_latter_output: Vec<isize> = input[DEFAULT_CUTOFF..].to_vec();
 
-        let actual_former_output: Vec<isize> = former_node.inner.iter().cloned().collect();
-        let actual_latter_output: Vec<isize> = latter_node.inner.iter().cloned().collect();
+        let actual_former_output: Vec<isize> = former_node.inner[0..DEFAULT_CUTOFF].iter().cloned().collect();
+        let actual_latter_output: Vec<isize> = latter_node.inner[0..DEFAULT_CUTOFF].iter().cloned().collect();
 
         assert_eq!(expected_former_output, actual_former_output);
         assert_eq!(expected_latter_output, actual_latter_output);
@@ -4040,7 +4095,7 @@ mod tests {
         let input: Vec<usize> = (0..(DEFAULT_INNER_SIZE + 1)).into_iter().collect();
 
         let mut btree: BTreeSet<usize> = input.iter().fold(BTreeSet::new(), |mut acc, curr| {
-            acc.insert(curr.clone());
+            acc.insert(*curr);
             acc
         });
 
@@ -4380,7 +4435,7 @@ mod tests {
         assert!(a.is_subset(&a));
         assert!(a.is_superset(&a));
         assert!(a.is_subset(&b));
-        assert!(!(b.is_subset(&a)));
+        assert!(!b.is_subset(&a));
         assert!(b.is_superset(&a));
         assert!(c.is_disjoint(&a));
         assert!(c.is_disjoint(&b));
@@ -4441,13 +4496,13 @@ mod tests {
             btree.range(0..=DEFAULT_INNER_SIZE + 1).count(),
             (0..=DEFAULT_INNER_SIZE + 1).count()
         );
-
         assert_eq!(
             btree.iter().rev().count(),
             (0..(DEFAULT_INNER_SIZE + 10)).count()
         );
+        let rang: Vec<_> = btree.range(0..DEFAULT_INNER_SIZE).rev().cloned().collect();
         assert_eq!(
-            btree.range(0..DEFAULT_INNER_SIZE).rev().count(),
+            rang.len(),
             (0..DEFAULT_INNER_SIZE).count()
         );
         assert_eq!(
