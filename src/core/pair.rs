@@ -4,11 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, Hash)]
-pub struct Pair<K, V>
-where
-    K: Ord,
-{
+#[derive(Debug, Default, Clone, Hash)]
+pub struct Pair<K, V> {
     pub key: K,
     pub value: V,
 }
@@ -20,7 +17,7 @@ where
     K: Ord,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
+        self.key.eq(&other.key)
     }
 }
 
@@ -45,5 +42,11 @@ where
 impl<K: Ord, V> Borrow<K> for Pair<K, V> {
     fn borrow(&self) -> &K {
         &self.key
+    }
+}
+
+impl<V> Borrow<str> for Pair<String, V> {
+    fn borrow(&self) -> &str {
+        self.key.as_str()
     }
 }

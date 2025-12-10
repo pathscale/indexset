@@ -6,10 +6,120 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-### Added
-- Variable page size for the concurrent implementation
+
+## [0.12.3] - 2025-06-28
+
+### Fixed
+- A **Bug** with CDC.
+
+## [0.12.2] - 2025-04-22
+
+### Fixed
+- A **Bug** that affects only the non-concurrent versions of the Tree.
 
 ### Changed
+- Made `range_idx` public for BTreeSet and BTreeMap.
+
+## [0.12.1] - 2025-04-21
+
+### Fixed
+- **Range** for **all** concurrent B-Trees was misbehaving in certain edge cases.
+
+## [0.12.0] - 2025-04-15
+
+### Changed
+- The BTree is now generic over the container.
+
+## [0.11.3] - 2025-04-04
+
+### Added
+- capacity and node_count methods.
+
+## [0.11.2] - 2025-03-08
+
+### Added
+- derive `Clone` and `Debug` for `ChangeEvent`
+
+## [0.11.1] - 2025-03-06
+
+### Changed
+- `crate::core` is now public
+
+## [0.11.0] - 2025-03-03
+
+### Added
+- `remove_some_cdc` to `BTreeMultiMap`
+
+### Changed
+- `MultiPair` has a bijection to `Pair`
+
+## [0.10.4] - 2025-02-15
+
+### Fixed
+- `BTreeMap::get` getting the __closest__ value instead of the __exact__ value
+
+## [0.10.3] - 2025-01-27
+
+### Changed
+- Made `pair`, `node`, `multipair` and `constants` public
+
+## [0.10.2] - 2025-01-11
+
+### Changed
+- Improved the README.
+
+## [0.10.1] - 2025-01-11
+
+### Fixed
+- Some edge cases in `concurrent::set::Range`
+
+## [0.10.0] - 2025-01-09
+
+### Added
+- `BTreeMultiMap`, a concurrent BTree that allows multiple values per key.
+
+## [0.9.0] - 2025-01-04
+
+### Changed
+- `CDC` API now does not return clones of Nodes anymore, instead returning __where__ to insert and remove elements.
+
+## [0.8.1] - 2025-01-03
+
+### Added
+- Add docs.rs coverage for opt-in feats
+
+## [0.8.0] - 2024-12-29
+
+### Fixed
+- erroneously returning false even when insertion was correct in `concurrent::{set, map}`.
+
+### Added
+- `range` method to `concurrent::map::BTreeMap`
+
+## [0.7.1] - 2024-12-27
+
+### Fixed
+- `concurrent` feature works without `cdc` being enabled.
+
+## [0.7.0] - 2024-12-22
+
+### Added
+- CDC feature. If toggled on, returns the change events associated with the mutating operation.
+- `with_maximum_node_size` method for `BTreeSet` and `BTreeMap`
+
+## [0.6.1] - 2024-12-20
+
+### Fixed
+- `remove` method for concurrent `BTreeSet` and `BTreeMap` does not need a mutable reference.
+
+## [0.6.0] - 2024-12-19
+
+### Added
+- A benchmark for concurrent implementations
+
+### Changed
+- A new **much faster** partially lock free concurrent implementation 
+- Reorganized the library
 
 ## [0.5.0] - 2024-09-18
 
@@ -112,7 +222,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BTreeSet`
 - `BTreeMap`
 
-[Unreleased]: https://github.com/brurucy/indexset/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/brurucy/indexset/compare/v0.12.3...HEAD
+
+[0.12.3]: https://github.com/brurucy/indexset/releases/tag/v0.12.3
+
+[0.12.2]: https://github.com/brurucy/indexset/releases/tag/v0.12.2
+
+[0.12.1]: https://github.com/brurucy/indexset/releases/tag/v0.12.1
+
+[0.12.0]: https://github.com/brurucy/indexset/releases/tag/v0.12.0
+
+[0.11.3]: https://github.com/brurucy/indexset/releases/tag/v0.11.3
+
+[0.11.2]: https://github.com/brurucy/indexset/releases/tag/v0.11.2
+
+[0.11.1]: https://github.com/brurucy/indexset/releases/tag/v0.11.1
+
+[0.11.0]: https://github.com/brurucy/indexset/releases/tag/v0.11.0
+
+[0.10.4]: https://github.com/brurucy/indexset/releases/tag/v0.10.4
+
+[0.10.3]: https://github.com/brurucy/indexset/releases/tag/v0.10.3
+
+[0.10.2]: https://github.com/brurucy/indexset/releases/tag/v0.10.2
+
+[0.10.1]: https://github.com/brurucy/indexset/releases/tag/v0.10.1
+
+[0.10.0]: https://github.com/brurucy/indexset/releases/tag/v0.10.0
+
+[0.9.0]: https://github.com/brurucy/indexset/releases/tag/v0.9.0
+
+[0.8.1]: https://github.com/brurucy/indexset/releases/tag/v0.8.1
+
+[0.8.0]: https://github.com/brurucy/indexset/releases/tag/v0.8.0
+
+[0.7.1]: https://github.com/brurucy/indexset/releases/tag/v0.7.1
+
+[0.7.0]: https://github.com/brurucy/indexset/releases/tag/v0.7.0
+
+[0.6.1]: https://github.com/brurucy/indexset/releases/tag/v0.6.1
+
+[0.6.0]: https://github.com/brurucy/indexset/releases/tag/v0.6.0
 
 [0.5.0]: https://github.com/brurucy/indexset/releases/tag/v0.5.0
 

@@ -1,9 +1,14 @@
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
-mod core;
+
+#[cfg(feature = "concurrent")]
+pub mod cdc;
+
+pub mod core;
 
 use crate::Entry::{Occupied, Vacant};
-use core::constants::{DEFAULT_CUTOFF, DEFAULT_INNER_SIZE};
+use core::constants::DEFAULT_INNER_SIZE;
+use core::node::*;
 use core::pair::Pair;
 use ftree::FenwickTree;
 #[cfg(feature = "serde")]
@@ -15,111 +20,7 @@ use std::iter::FusedIterator;
 use std::mem::swap;
 use std::ops::{Index, RangeBounds};
 
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Node<T>
-where
-    T: Ord,
-{
-    pub inner: Vec<T>,
-}
-
-impl<T: Ord> Ord for Node<T>
-where
-    T: Ord,
-{
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.last().cmp(&other.last())
-    }
-}
-
-impl<T: Ord> PartialOrd for Node<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T: Ord> Default for Node<T> {
-    fn default() -> Self {
-        Self {
-            inner: Vec::with_capacity(DEFAULT_INNER_SIZE),
-        }
-    }
-}
-
-#[inline]
-fn search<T: Ord>(haystack: &[T], needle: &T) -> Result<usize, usize> {
-    let mut j = haystack.len();
-
-    unsafe {
-        let mut i = 0;
-        let p = haystack.as_ptr().cast::<T>();
-        let mut m = j >> 1;
-        while i != j {
-            match (*p.add(m)).borrow().cmp(needle) {
-                Ordering::Equal => return Ok(m),
-                Ordering::Less => {
-                    i = m + 1;
-                    m = (i + j) >> 1;
-                }
-                Ordering::Greater => {
-                    j = m;
-                    m = (i + j) >> 1;
-                }
-            }
-        }
-        Err(i)
-    }
-}
-
-impl<T: Ord> Node<T> {
-    #[inline]
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            inner: Vec::with_capacity(capacity),
-            ..Default::default()
-        }
-    }
-    #[inline]
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.inner.get(index)
-    }
-    #[inline]
-    pub fn split_off(&mut self, cutoff: usize) -> Self {
-        let latter_inner = self.inner.split_off(cutoff);
-
-        Self {
-            inner: latter_inner,
-        }
-    }
-    #[inline]
-    pub fn halve(&mut self) -> Self {
-        self.split_off(DEFAULT_CUTOFF)
-    }
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-    #[inline]
-    pub fn insert(&mut self, value: T) -> bool {
-        match search(&self.inner, &value) {
-            Ok(_) => return false,
-            Err(idx) => {
-                self.inner.insert(idx, value);
-            }
-        }
-
-        true
-    }
-    #[inline]
-    pub fn last(&self) -> Option<&T> {
-        self.inner.last()
-    }
-    #[inline]
-    pub fn delete(&mut self, index: usize) -> T {
-        self.inner.remove(index)
-    }
-}
+type Node<T> = Vec<T>;
 
 /// An ordered set based on a B-Tree.
 ///
@@ -142,7 +43,7 @@ impl<T: Ord> Node<T> {
 /// # Examples
 ///
 /// ```
-/// use indexset::BTreeSet;
+/// use wt_indexset::BTreeSet;
 ///
 /// // Type inference lets us omit an explicit type signature (which
 /// // would be `BTreeSet<&str>` in this example).
@@ -172,7 +73,7 @@ impl<T: Ord> Node<T> {
 /// A `BTreeSet` with a known list of items can be initialized from an array:
 ///
 /// ```
-/// use indexset::BTreeSet;
+/// use wt_indexset::BTreeSet;
 ///
 /// let set = BTreeSet::from_iter([1, 2, 3]);
 /// ```
@@ -200,7 +101,7 @@ impl<T: Ord> BTreeSet<T> {
     ///
     /// ```
     /// # #![allow(unused_mut)]
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set: BTreeSet<i32> = BTreeSet::new();
     /// ```
@@ -216,12 +117,12 @@ impl<T: Ord> BTreeSet<T> {
     ///
     /// ```
     /// # #![allow(unused_mut)]
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set: BTreeSet<i32> = BTreeSet::with_maximum_node_size(128);
     pub fn with_maximum_node_size(maximum_node_size: usize) -> Self {
         let mut new: Self = Default::default();
-        new.inner = vec![Node::new(maximum_node_size)];
+        new.inner = vec![Node::with_capacity(maximum_node_size)];
         new.node_capacity = maximum_node_size;
 
         new
@@ -231,7 +132,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut v = BTreeSet::new();
     /// v.insert(1);
@@ -239,7 +140,7 @@ impl<T: Ord> BTreeSet<T> {
     /// assert!(v.is_empty());
     /// ```
     pub fn clear(&mut self) {
-        self.inner = vec![Node::new(self.node_capacity)];
+        self.inner = vec![Node::with_capacity(self.node_capacity)];
         self.index = FenwickTree::from_iter(vec![0]);
         self.len = 0;
     }
@@ -292,9 +193,8 @@ impl<T: Ord> BTreeSet<T> {
         Q: Ord + ?Sized,
     {
         let node_idx = self.locate_node(value);
-        let position_within_node = self.inner[node_idx]
-            .inner
-            .partition_point(|item| item.borrow() < value);
+        let position_within_node =
+            self.inner[node_idx].partition_point(|item| item.borrow() < value);
 
         (node_idx, position_within_node)
     }
@@ -305,9 +205,7 @@ impl<T: Ord> BTreeSet<T> {
         P: FnMut(&Q) -> bool,
     {
         let node_idx = self.locate_node_cmp(&mut cmp);
-        let position_within_node = self.inner[node_idx]
-            .inner
-            .partition_point(|item| cmp(item.borrow()));
+        let position_within_node = self.inner[node_idx].partition_point(|item| cmp(item.borrow()));
 
         (node_idx, position_within_node)
     }
@@ -338,7 +236,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from_iter([1, 2, 3]);
     /// assert_eq!(set.get_index(0), Some(&1));
@@ -356,7 +254,7 @@ impl<T: Ord> BTreeSet<T> {
     fn get_mut_index(&mut self, index: usize) -> Option<&mut T> {
         let (node_idx, position_within_node) = self.locate_ith(index);
         if let Some(_) = self.inner.get(node_idx) {
-            return self.inner[node_idx].inner.get_mut(position_within_node);
+            return self.inner[node_idx].get_mut(position_within_node);
         }
 
         None
@@ -371,7 +269,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from([1, 2, 3]);
     /// assert_eq!(set.get(&2), Some(&2));
@@ -399,7 +297,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from_iter([1, 2, 3, 5]);
     /// assert_eq!(set.lower_bound(&2), Some(&2));
@@ -422,7 +320,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut v = BTreeSet::new();
     /// assert_eq!(v.len(), 0);
@@ -448,7 +346,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     ///
@@ -458,15 +356,15 @@ impl<T: Ord> BTreeSet<T> {
     /// ```
     pub fn insert(&mut self, value: T) -> bool {
         let node_idx = self.locate_node(&value);
-        if self.inner[node_idx].len() == DEFAULT_INNER_SIZE {
+        if self.inner[node_idx].len() == self.node_capacity {
             let new_node = self.inner[node_idx].halve();
             let mut insert_node_idx = node_idx;
-            if value >= new_node.inner[0] {
+            if value >= new_node[0] {
                 insert_node_idx += 1;
             }
 
             self.inner.insert(node_idx + 1, new_node);
-            if self.inner[insert_node_idx].insert(value) {
+            if NodeLike::insert(&mut self.inner[insert_node_idx], value).0 {
                 // Reconstruct the index after the new node and inner value inserts.
                 self.index = FenwickTree::from_iter(self.inner.iter().map(|node| node.len()));
                 self.len += 1;
@@ -477,7 +375,7 @@ impl<T: Ord> BTreeSet<T> {
                 self.index = FenwickTree::from_iter(self.inner.iter().map(|node| node.len()));
                 false
             }
-        } else if self.inner[node_idx].insert(value) {
+        } else if NodeLike::insert(&mut self.inner[node_idx], value).0 {
             self.index.add_at(node_idx, 1);
             self.len += 1;
 
@@ -493,7 +391,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     /// set.insert(Vec::<i32>::new());
@@ -518,7 +416,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from_iter([1, 2, 3]);
     /// assert_eq!(set.contains(&1), true);
@@ -555,7 +453,7 @@ impl<T: Ord> BTreeSet<T> {
         false
     }
     fn delete_at(&mut self, node_idx: usize, position_within_node: usize) -> T {
-        let removal = self.inner[node_idx].delete(position_within_node);
+        let removal = self.inner[node_idx].remove(position_within_node);
 
         let mut decrease_length = false;
         // check whether the node has to be deleted
@@ -629,7 +527,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     ///
@@ -654,7 +552,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::from_iter([1, 2, 3]);
     /// assert_eq!(set.take(&2), Some(2));
@@ -675,7 +573,7 @@ impl<T: Ord> BTreeSet<T> {
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     /// assert_eq!(set.first(), None);
@@ -699,7 +597,7 @@ impl<T: Ord> BTreeSet<T> {
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     /// assert_eq!(set.last(), None);
@@ -723,7 +621,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     ///
@@ -748,7 +646,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     ///
@@ -769,7 +667,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::new();
     ///
@@ -781,7 +679,7 @@ impl<T: Ord> BTreeSet<T> {
     /// ```
     pub fn pop_last(&mut self) -> Option<T> {
         let last_node_idx = self.inner.len() - 1;
-        let mut last_position_within_node = self.inner[last_node_idx].inner.len();
+        let mut last_position_within_node = self.inner[last_node_idx].len();
         last_position_within_node = last_position_within_node.saturating_sub(1);
 
         if let Some(candidate_node) = self.inner.get(last_node_idx) {
@@ -797,7 +695,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut v = BTreeSet::new();
     /// assert!(v.is_empty());
@@ -813,7 +711,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let sup = BTreeSet::from_iter([1, 2, 3]);
     /// let mut set = BTreeSet::new();
@@ -837,7 +735,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let sub = BTreeSet::from_iter([1, 2]);
     /// let mut set = BTreeSet::new();
@@ -864,7 +762,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let a = BTreeSet::from_iter([1, 2, 3]);
     /// let mut b = BTreeSet::new();
@@ -888,7 +786,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from_iter([1, 2, 3]);
     /// let mut set_iter = set.iter();
@@ -901,7 +799,7 @@ impl<T: Ord> BTreeSet<T> {
     /// Values returned by the iterator are returned in ascending order:
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from_iter([3, 1, 2]);
     /// let mut set_iter = set.iter();
@@ -910,7 +808,7 @@ impl<T: Ord> BTreeSet<T> {
     /// assert_eq!(set_iter.next(), Some(&3));
     /// assert_eq!(set_iter.next(), None);
     /// ```
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter::new(self)
     }
     /// Visits the elements representing the union,
@@ -920,7 +818,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut a = BTreeSet::new();
     /// a.insert(1);
@@ -931,7 +829,7 @@ impl<T: Ord> BTreeSet<T> {
     /// let union: Vec<_> = a.union(&b).cloned().collect();
     /// assert_eq!(union, [1, 2]);
     /// ```
-    pub fn union<'a>(&'a self, other: &'a Self) -> Union<T> {
+    pub fn union<'a>(&'a self, other: &'a Self) -> Union<'a, T> {
         Union {
             merge_iter: MergeIter {
                 start: true,
@@ -949,7 +847,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut a = BTreeSet::new();
     /// a.insert(1);
@@ -962,7 +860,7 @@ impl<T: Ord> BTreeSet<T> {
     /// let diff: Vec<_> = a.difference(&b).cloned().collect();
     /// assert_eq!(diff, [1]);
     /// ```
-    pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<T> {
+    pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<'a, T> {
         Difference {
             merge_iter: MergeIter {
                 start: true,
@@ -980,7 +878,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut a = BTreeSet::new();
     /// a.insert(1);
@@ -993,7 +891,7 @@ impl<T: Ord> BTreeSet<T> {
     /// let sym_diff: Vec<_> = a.symmetric_difference(&b).cloned().collect();
     /// assert_eq!(sym_diff, [1, 3]);
     /// ```
-    pub fn symmetric_difference<'a>(&'a self, other: &'a Self) -> SymmetricDifference<T> {
+    pub fn symmetric_difference<'a>(&'a self, other: &'a Self) -> SymmetricDifference<'a, T> {
         SymmetricDifference {
             merge_iter: MergeIter {
                 start: true,
@@ -1011,7 +909,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut a = BTreeSet::new();
     /// a.insert(1);
@@ -1024,7 +922,7 @@ impl<T: Ord> BTreeSet<T> {
     /// let intersection: Vec<_> = a.intersection(&b).cloned().collect();
     /// assert_eq!(intersection, [2]);
     /// ```
-    pub fn intersection<'a>(&'a self, other: &'a Self) -> Intersection<T> {
+    pub fn intersection<'a>(&'a self, other: &'a Self) -> Intersection<'a, T> {
         Intersection {
             merge_iter: MergeIter {
                 start: true,
@@ -1043,7 +941,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut set = BTreeSet::from_iter([1, 2, 3, 4, 5, 6]);
     /// // Keep only the even numbers.
@@ -1058,7 +956,7 @@ impl<T: Ord> BTreeSet<T> {
     {
         let mut positions_to_delete = vec![];
         for (node_idx, node) in self.inner.iter().enumerate() {
-            for (position_within_node, item) in node.inner.iter().enumerate() {
+            for (position_within_node, item) in node.iter().enumerate() {
                 if !f(item.borrow()) {
                     positions_to_delete.push((node_idx, position_within_node));
                 }
@@ -1108,7 +1006,7 @@ impl<T: Ord> BTreeSet<T> {
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut a = BTreeSet::new();
     /// a.insert(1);
@@ -1161,7 +1059,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let mut a = BTreeSet::new();
     /// a.insert(1);
@@ -1243,7 +1141,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     /// use std::ops::Bound::Included;
     ///
     /// let mut set = BTreeSet::new();
@@ -1284,7 +1182,7 @@ impl<T: Ord> BTreeSet<T> {
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeSet;
+    /// use wt_indexset::BTreeSet;
     ///
     /// let set = BTreeSet::from_iter([1, 2, 3]);
     /// assert_eq!(set.rank(&1), 0);
@@ -1315,7 +1213,7 @@ impl<T: Ord> BTreeSet<T> {
 
         offset + position_within_node
     }
-    fn range_idx<R>(&self, range: R) -> Range<'_, T>
+    pub fn range_idx<R>(&self, range: R) -> Range<'_, T>
     where
         R: RangeBounds<usize>,
     {
@@ -1325,13 +1223,13 @@ impl<T: Ord> BTreeSet<T> {
         ) = self.resolve_range(range);
 
         let front_iter = if front_node_idx < self.inner.len() {
-            Some(self.inner[front_node_idx].inner[front_start_idx..].iter())
+            Some(self.inner[front_node_idx][front_start_idx..].iter())
         } else {
             None
         };
 
         let back_iter = if back_node_idx < self.inner.len() {
-            Some(self.inner[back_node_idx].inner[..=back_start_idx].iter())
+            Some(self.inner[back_node_idx][..=back_start_idx].iter())
         } else {
             None
         };
@@ -1387,7 +1285,7 @@ where
         let node_capacity = DEFAULT_INNER_SIZE;
 
         Self {
-            inner: vec![Node::new(node_capacity)],
+            inner: vec![Node::with_capacity(node_capacity)],
             index: FenwickTree::from_iter(vec![0]),
             node_capacity,
             len: 0,
@@ -1425,8 +1323,8 @@ where
             current_front_idx: 0,
             current_back_node_idx: btree.inner.len() - 1,
             current_back_idx: btree.len(),
-            current_front_iterator: Some(btree.inner[0].inner.iter()),
-            current_back_iterator: Some(btree.inner[btree.inner.len() - 1].inner.iter()),
+            current_front_iterator: Some(btree.inner[0].iter()),
+            current_back_iterator: Some(btree.inner[btree.inner.len() - 1].iter()),
         }
     }
 }
@@ -1450,7 +1348,7 @@ where
                 return None;
             }
             self.current_front_iterator =
-                Some(self.btree.inner[self.current_front_node_idx].inner.iter());
+                Some(self.btree.inner[self.current_front_node_idx].iter());
 
             self.next()
         }
@@ -1477,8 +1375,7 @@ where
                 return None;
             };
             self.current_back_node_idx -= 1;
-            self.current_back_iterator =
-                Some(self.btree.inner[self.current_back_node_idx].inner.iter());
+            self.current_back_iterator = Some(self.btree.inner[self.current_back_node_idx].iter());
 
             self.next_back()
         }
@@ -1988,7 +1885,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use indexset::BTreeMap;
+/// use wt_indexset::BTreeMap;
 ///
 /// // type inference lets us omit an explicit type signature (which
 /// // would be `BTreeMap<&str, &str>` in this example).
@@ -2030,7 +1927,7 @@ where
 /// A `BTreeMap` with a known list of items can be initialized from an array:
 ///
 /// ```
-/// use indexset::BTreeMap;
+/// use wt_indexset::BTreeMap;
 ///
 /// let solar_distance = BTreeMap::from_iter([
 ///     ("Mercury", 0.4),
@@ -2085,7 +1982,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(1, "a");
@@ -2118,7 +2015,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(1, "a");
@@ -2138,7 +2035,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2163,7 +2060,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// assert_eq!(map.first_key_value(), None);
@@ -2189,7 +2086,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2213,7 +2110,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2236,7 +2133,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2253,7 +2150,9 @@ where
             .locate_value_cmp(|item: &Pair<K, V>| item.key.borrow() < key);
         if let Some(candidate_node) = self.set.inner.get(node_idx) {
             if let Some(candidate_value) = candidate_node.get(position_within_node) {
-                return Some((&candidate_value.key, &candidate_value.value));
+                if candidate_value.key.borrow() == key {
+                    return Some((&candidate_value.key, &candidate_value.value));
+                }
             }
         }
 
@@ -2269,7 +2168,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2287,14 +2186,9 @@ where
             .set
             .locate_value_cmp(|item: &Pair<K, V>| item.key.borrow() < key);
         if self.set.inner.get(node_idx).is_some()
-            && self.set.inner[node_idx]
-                .inner
-                .get(position_within_node)
-                .is_some()
+            && self.set.inner[node_idx].get(position_within_node).is_some()
         {
-            let entry = self.set.inner[node_idx]
-                .inner
-                .get_mut(position_within_node)?;
+            let entry = self.set.inner[node_idx].get_mut(position_within_node)?;
 
             return Some(&mut entry.value);
         }
@@ -2308,7 +2202,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2340,7 +2234,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// assert_eq!(map.insert(37, "a"), None);
@@ -2373,7 +2267,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(2, "b");
@@ -2394,7 +2288,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(1, "hello");
@@ -2415,7 +2309,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// assert!(a.is_empty());
@@ -2432,7 +2326,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(3, "c");
@@ -2446,7 +2340,7 @@ where
     /// let (first_key, first_value) = map.iter().next().unwrap();
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
-    pub fn iter(&self) -> IterMap<K, V> {
+    pub fn iter(&self) -> IterMap<'_, K, V> {
         IterMap {
             inner: self.set.iter(),
         }
@@ -2458,7 +2352,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::from_iter([
     ///    ("a", 1),
@@ -2473,20 +2367,20 @@ where
     ///     }
     /// }
     /// ```
-    pub fn iter_mut(&mut self) -> IterMut<K, V> {
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
         let last_node_idx = self.set.inner.len() - 1;
         let len = self.set.len();
         let mut inner = self.set.inner.iter_mut();
         let front_iter = {
             if let Some(node) = inner.next() {
-                node.inner.iter_mut()
+                node.iter_mut()
             } else {
                 [].iter_mut()
             }
         };
         let back_iter = {
             if let Some(node) = inner.next_back() {
-                node.inner.iter_mut()
+                node.iter_mut()
             } else {
                 [].iter_mut()
             }
@@ -2509,7 +2403,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(2, "b");
@@ -2518,7 +2412,7 @@ where
     /// let keys: Vec<_> = a.keys().cloned().collect();
     /// assert_eq!(keys, [1, 2]);
     /// ```
-    pub fn keys(&self) -> Keys<K, V> {
+    pub fn keys(&self) -> Keys<'_, K, V> {
         Keys {
             inner: self.set.iter(),
         }
@@ -2531,7 +2425,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "b");
@@ -2553,7 +2447,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// assert_eq!(a.len(), 0);
@@ -2572,7 +2466,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     ///
@@ -2591,7 +2485,7 @@ where
     ///
     /// ```
     /// # #![allow(unused_mut)]
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut set: BTreeMap<usize, usize> = BTreeMap::with_maximum_node_size(128);
     pub fn with_maximum_node_size(maximum_node_size: usize) -> Self {
@@ -2607,7 +2501,7 @@ where
     /// Draining elements in ascending order, while keeping a usable map each iteration.
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2630,7 +2524,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::{BTreeMap};
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     ///
@@ -2653,7 +2547,7 @@ where
     /// Draining elements in descending order, while keeping a usable map each iteration.
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2688,7 +2582,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     /// use std::ops::Bound::Included;
     ///
     /// let mut map = BTreeMap::new();
@@ -2700,7 +2594,7 @@ where
     /// }
     /// assert_eq!(Some((&5, &"b")), map.range(4..).next());
     /// ```
-    pub fn range<Q, R>(&self, range: R) -> RangeMap<K, V>
+    pub fn range<Q, R>(&self, range: R) -> RangeMap<'_, K, V>
     where
         Q: Ord + ?Sized,
         K: Borrow<Q>,
@@ -2710,6 +2604,14 @@ where
 
         RangeMap {
             inner: self.set.range_idx(start_idx..=end_idx),
+        }
+    }
+    pub fn range_idx<R>(&self, range: R) -> RangeMap<'_, K, V>
+    where
+        R: RangeBounds<usize>,
+    {
+        RangeMap {
+            inner: self.set.range_idx(range),
         }
     }
     fn range_to_idx<Q, R>(&self, range: R) -> (usize, usize)
@@ -2760,7 +2662,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map: BTreeMap<&str, i32> =
     ///     [("Alice", 0), ("Bob", 0), ("Carol", 0), ("Cheryl", 0)].into();
@@ -2771,7 +2673,7 @@ where
     ///     println!("{name} => {balance}");
     /// }
     /// ```
-    pub fn range_mut<Q, R>(&mut self, range: R) -> RangeMut<K, V>
+    pub fn range_mut<Q, R>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         Q: Ord + ?Sized,
         K: Borrow<Q>,
@@ -2781,7 +2683,7 @@ where
 
         self.range_mut_idx(start_idx..=end_idx)
     }
-    pub fn range_mut_idx<R>(&mut self, range: R) -> RangeMut<K, V>
+    pub fn range_mut_idx<R>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         R: RangeBounds<usize>,
     {
@@ -2789,13 +2691,13 @@ where
             (global_front_idx, front_node_idx, front_start_idx),
             (global_back_idx, back_node_idx, back_start_idx),
         ) = self.set.resolve_range(range);
-        let end = self.set.inner[back_node_idx].inner.len();
+        let end = self.set.inner[back_node_idx].len();
 
         let mut inner = self.set.inner.iter_mut();
 
         let mut front_iter = {
             if let Some(node) = inner.nth(front_node_idx) {
-                node.inner.iter_mut()
+                node.iter_mut()
             } else {
                 [].iter_mut()
             }
@@ -2803,7 +2705,7 @@ where
 
         let mut back_iter = {
             if let Some(node) = inner.nth(back_node_idx - front_node_idx) {
-                node.inner.iter_mut()
+                node.iter_mut()
             } else {
                 [].iter_mut()
             }
@@ -2846,7 +2748,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2880,7 +2782,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map = BTreeMap::new();
     /// map.insert(1, "a");
@@ -2912,7 +2814,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut map: BTreeMap<i32, i32> = (0..8).map(|x| (x, x*10)).collect();
     /// // Keep only the elements with even-numbered keys.
@@ -2927,7 +2829,7 @@ where
     {
         let mut positions_to_delete = vec![];
         for (node_idx, node) in self.set.inner.iter_mut().enumerate() {
-            for (position_within_node, item) in node.inner.iter_mut().enumerate() {
+            for (position_within_node, item) in node.iter_mut().enumerate() {
                 if !f(item.key.borrow(), &mut item.value) {
                     positions_to_delete.push((node_idx, position_within_node));
                 }
@@ -2950,7 +2852,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(1, "a");
@@ -2989,7 +2891,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(1, "hello");
@@ -2998,7 +2900,7 @@ where
     /// let values: Vec<&str> = a.values().cloned().collect();
     /// assert_eq!(values, ["hello", "goodbye"]);
     /// ```
-    pub fn values(&self) -> Values<K, V> {
+    pub fn values(&self) -> Values<'_, K, V> {
         Values {
             inner: self.set.iter(),
         }
@@ -3010,7 +2912,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let mut a = BTreeMap::new();
     /// a.insert(1, String::from("hello"));
@@ -3024,7 +2926,7 @@ where
     /// assert_eq!(values, [String::from("hello!"),
     ///                     String::from("goodbye!")]);
     /// ```
-    pub fn values_mut(&mut self) -> ValuesMut<K, V> {
+    pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
         ValuesMut {
             inner: self.iter_mut(),
         }
@@ -3136,7 +3038,7 @@ where
     /// Basic usage:
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     /// use std::ops::Bound;
     ///
     /// let mut a = BTreeMap::new();
@@ -3181,7 +3083,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use indexset::BTreeMap;
+    /// use wt_indexset::BTreeMap;
     ///
     /// let set = BTreeMap::from_iter([(1, "a"), (2, "b"), (3, "c")]);
     /// assert_eq!(set.rank(&1), 0);
@@ -3592,7 +3494,7 @@ where
                 // advance front
                 self.current_front_node_idx += 1;
                 if let Some(node) = self.inner.next() {
-                    self.current_front_iterator = node.inner.iter_mut();
+                    self.current_front_iterator = node.iter_mut();
                 }
 
                 return self.next();
@@ -3632,7 +3534,7 @@ where
                 // advance back
                 self.current_back_node_idx -= 1;
                 if let Some(node) = self.inner.next_back() {
-                    self.current_back_iterator = node.inner.iter_mut();
+                    self.current_back_iterator = node.iter_mut();
                 }
 
                 return self.next_back();
@@ -3848,7 +3750,9 @@ impl<'a, K: Ord, V> CursorMap<'a, K, V> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BTreeMap, BTreeSet, Node, DEFAULT_CUTOFF, DEFAULT_INNER_SIZE};
+    use super::core::constants::*;
+    use super::core::node::*;
+    use crate::{BTreeMap, BTreeSet, Node};
     use rand::{Rng, SeedableRng};
     use std::collections::Bound::Included;
 
@@ -3858,14 +3762,15 @@ mod tests {
 
         let expected_output: Vec<isize> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-        let actual_node = input
-            .iter()
-            .fold(Node::new(DEFAULT_INNER_SIZE), |mut acc, curr| {
-                acc.insert(*curr);
-                acc
-            });
+        let actual_node =
+            input
+                .iter()
+                .fold(Node::with_capacity(DEFAULT_INNER_SIZE), |mut acc, curr| {
+                    NodeLike::insert(&mut acc, *curr);
+                    acc
+                });
 
-        let actual_output: Vec<isize> = actual_node.inner.iter().cloned().collect();
+        let actual_output: Vec<isize> = actual_node.iter().cloned().collect();
 
         assert_eq!(expected_output, actual_output);
         assert_eq!(*actual_node.last().unwrap(), 10);
@@ -3878,17 +3783,17 @@ mod tests {
             input.push(item.clone() as isize);
         }
 
-        let mut former_node = Node::new(DEFAULT_INNER_SIZE);
+        let mut former_node = Node::with_capacity(DEFAULT_INNER_SIZE);
         input.iter().for_each(|item| {
-            former_node.insert(item.clone());
+            NodeLike::insert(&mut former_node, item.clone());
         });
         let latter_node = former_node.halve();
 
         let expected_former_output: Vec<isize> = input[0..DEFAULT_CUTOFF].to_vec();
         let expected_latter_output: Vec<isize> = input[DEFAULT_CUTOFF..].to_vec();
 
-        let actual_former_output: Vec<isize> = former_node.inner.iter().cloned().collect();
-        let actual_latter_output: Vec<isize> = latter_node.inner.iter().cloned().collect();
+        let actual_former_output: Vec<isize> = former_node.iter().cloned().collect();
+        let actual_latter_output: Vec<isize> = latter_node.iter().cloned().collect();
 
         assert_eq!(expected_former_output, actual_former_output);
         assert_eq!(expected_latter_output, actual_latter_output);
@@ -4010,6 +3915,17 @@ mod tests {
                 assert_eq!(back_spine.last(), None);
             }
         });
+    }
+
+    #[test]
+    fn test_map_get() {
+        let btree = BTreeMap::from_iter((0..(DEFAULT_INNER_SIZE * 10)).map(|i| (i, i)));
+
+        assert_eq!(btree.len(), DEFAULT_INNER_SIZE * 10);
+
+        for item in 0..DEFAULT_INNER_SIZE * 10 {
+            assert_eq!(btree.get(&item), Some(&item));
+        }
     }
 
     #[test]
@@ -4390,7 +4306,7 @@ mod tests {
         let mut btree = BTreeSet::new();
         let n = 100_000;
         for _ in 0..n {
-            let value: u64 = rng.gen_range(1..10000);
+            let value: u64 = rng.random_range(1..10000);
             let lower: u64 = 1650;
             let len_before = btree.len();
             // Use max to increase the number of duplicates
